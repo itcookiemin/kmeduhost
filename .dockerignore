@@ -4,5 +4,4 @@ target/
 .gitignore
 .idea/
 *.iml
-.env
 docker-compose.override.yml
