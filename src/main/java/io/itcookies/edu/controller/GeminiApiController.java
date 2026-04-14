@@ -46,12 +46,17 @@ public class GeminiApiController {
 
         String fullMessage = systemPrompt + "\n\n사용자 요청: " + userMessage;
 
+        // responseMimeType으로 JSON 응답 강제
+        Map<String, Object> generationConfig = new HashMap<>();
+        generationConfig.put("responseMimeType", "application/json");
+
         Map<String, Object> body = new HashMap<>();
         body.put("contents", List.of(
                 Map.of("parts", List.of(
                         Map.of("text", fullMessage)
                 ))
         ));
+        body.put("generationConfig", generationConfig);
 
         HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
 
@@ -59,18 +64,40 @@ public class GeminiApiController {
             ResponseEntity<Map> response = restTemplate.postForEntity(url, entity, Map.class);
             Map<?, ?> geminiBody = response.getBody();
 
+            if (geminiBody == null) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body(Map.of("status", "error", "message", "Gemini API 응답이 비어있습니다."));
+            }
+
             // Gemini 응답에서 텍스트 추출: candidates[0].content.parts[0].text
             List<?> candidates = (List<?>) geminiBody.get("candidates");
+            if (candidates == null || candidates.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body(Map.of("status", "error", "message", "Gemini 응답에 candidates가 없습니다."));
+            }
+
             Map<?, ?> candidate = (Map<?, ?>) candidates.get(0);
             Map<?, ?> content = (Map<?, ?>) candidate.get("content");
             List<?> parts = (List<?>) content.get("parts");
             Map<?, ?> part = (Map<?, ?>) parts.get(0);
             String text = (String) part.get("text");
 
-            // JSON 파싱 (마크다운 코드블록 제거)
+            if (text == null || text.isBlank()) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body(Map.of("status", "error", "message", "Gemini 응답 텍스트가 비어있습니다."));
+            }
+
+            // 마크다운 코드블록 제거 후 JSON 파싱
             text = text.trim();
             if (text.startsWith("```")) {
-                text = text.replaceAll("^```[a-zA-Z]*\\n?", "").replaceAll("```$", "").trim();
+                text = text.replaceAll("(?s)^```[a-zA-Z]*\\n?", "").replaceAll("```\\s*$", "").trim();
+            }
+
+            // { } 사이 JSON 추출 (앞뒤 불필요한 텍스트 방어 처리)
+            int start = text.indexOf('{');
+            int end = text.lastIndexOf('}');
+            if (start != -1 && end != -1 && end > start) {
+                text = text.substring(start, end + 1);
             }
 
             com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
@@ -78,9 +105,17 @@ public class GeminiApiController {
             Map<String, Object> result = mapper.readValue(text, Map.class);
             return ResponseEntity.ok(result);
 
+        } catch (org.springframework.web.client.HttpStatusCodeException e) {
+            // Gemini API 자체가 4xx/5xx 반환한 경우 → 실제 오류 내용 포함
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("status", "error", "message",
+                            "Gemini API 오류 [" + e.getStatusCode() + "]: " + e.getResponseBodyAsString()));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("status", "error", "message", "JSON 파싱 실패: " + e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("status", "error", "message", "Gemini API 호출 실패: " + e.getMessage()));
+                    .body(Map.of("status", "error", "message", "서버 오류: " + e.getMessage()));
         }
     }
 
